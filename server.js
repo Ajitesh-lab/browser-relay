@@ -179,9 +179,9 @@ app.post('/navigate', async (req, res) => {
     console.log(`[pinned] stale tab for ${domainKey} — creating fresh`);
   }
 
-  // First time for this domain — open a new tab, pin it, register it
+  // First time for this domain — open a new tab, pin it silently in background
   try {
-    const newTab = await sendCommand('new_tab', { url, pinned: true });
+    const newTab = await sendCommand('new_tab', { url, pinned: true, active: false });
     const tabId = newTab.tabId;
     pinnedTabs.set(domainKey, { tabId, url });
     console.log(`[pinned] opened and pinned tab ${tabId} for ${domainKey}`);

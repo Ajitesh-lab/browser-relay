@@ -50,7 +50,7 @@ async function handleCommand({ id, type, params = {} }) {
       result = 'v9';
 
     } else if (type === 'new_tab') {
-      const tab = await chrome.tabs.create({ url: params.url || 'about:blank', active: true, pinned: params.pinned || false });
+      const tab = await chrome.tabs.create({ url: params.url || 'about:blank', active: params.active !== false, pinned: params.pinned || false });
       result = { ok: true, tabId: tab.id, url: params.url };
 
     } else if (type === 'pin_tab') {
