@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Browser Relay",
+  "version": "1.0",
+  "description": "Connects your browser to a local AI relay server",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "windows",
+    "scripting",
+    "alarms"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["keepalive.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Browser Relay",
+    "default_popup": "popup.html"
+  }
+}
