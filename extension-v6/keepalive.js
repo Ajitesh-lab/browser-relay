@@ -1,5 +1,9 @@
-if (!window.__relayRunning) {
-  window.__relayRunning = true;
+// Use a version key so re-injection after extension reload always reconnects
+const _RELAY_VERSION = 'v11';
+if (window.__relayVersion !== _RELAY_VERSION) {
+  // Close old WebSocket if lingering from previous version
+  if (window.__relayWs) try { window.__relayWs.close(); } catch(_) {}
+  window.__relayVersion = _RELAY_VERSION;
 
   // Keep background service worker alive
   let keepalivePort = null;
@@ -111,21 +115,15 @@ if (!window.__relayRunning) {
         el.value = params.value;
         el.dispatchEvent(new Event('change', { bubbles: true }));
         result = { ok: true, value: el.value };
-      } else if (type === 'new_tab') {
-        window.open(params.url || 'about:blank', '_blank');
-        result = { ok: true, url: params.url };
-      } else if (type === 'new_hidden_window') {
-        // Open as background tab — doesn't steal focus from current tab
-        window.open(params.url || 'about:blank', '_blank');
-        result = { ok: true, url: params.url };
-      } else if (type === 'close_hidden') {
-        // Navigate current tab to blank to "close" it from within
-        location.href = 'about:blank';
-        result = { ok: true };
-      } else if (type === 'navigate') {
+      } else if (type === 'content' && params.tabId) {
+        // tabId-targeted content read → must go to background
+        return null;
+      } else if (type === 'navigate' && !params.tabId) {
+        // No tabId → navigate current tab locally
         location.href = params.url;
         result = { ok: true, url: params.url };
-      } else if (type === 'tabs_list') {
+      } else if (type === 'tabs_list' && !params.tabId) {
+        // Quick local-only list (background has the full version)
         result = [{ url: location.href, title: document.title, active: true }];
       } else {
         return null; // Forward to background only if truly needed
@@ -138,6 +136,7 @@ if (!window.__relayRunning) {
   let ws = null;
   function connect() {
     ws = new WebSocket('ws://127.0.0.1:9999/ws');
+    window.__relayWs = ws; // expose for cleanup on reload
 
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'hello', version: 'v10', url: location.href, title: document.title }));
