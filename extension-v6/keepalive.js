@@ -1,5 +1,5 @@
 // Use a version key so re-injection after extension reload always reconnects
-const _RELAY_VERSION = 'v11';
+const _RELAY_VERSION = 'v12';
 if (window.__relayVersion !== _RELAY_VERSION) {
   // Close old WebSocket if lingering from previous version
   if (window.__relayWs) try { window.__relayWs.close(); } catch(_) {}
@@ -126,9 +126,9 @@ if (window.__relayVersion !== _RELAY_VERSION) {
         // No tabId → navigate current tab locally
         location.href = params.url;
         result = { ok: true, url: params.url };
-      } else if (type === 'tabs_list' && !params.tabId) {
-        // Quick local-only list (background has the full version)
-        result = [{ url: location.href, title: document.title, active: true }];
+      } else if (type === 'tabs_list') {
+        // Always forward to background — it has chrome.tabs API with full tab IDs
+        return null;
       } else {
         return null; // Forward to background only if truly needed
       }

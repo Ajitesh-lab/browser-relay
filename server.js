@@ -127,17 +127,15 @@ async function internalNavigate(url) {
   const pinned = pinnedTabs.get(domainKey);
   if (pinned) {
     try {
-      const tabs = await sendCommand('tabs_list', {});
-      const alive = Array.isArray(tabs) && tabs.find(t => t.id === pinned.tabId);
-      if (alive) {
-        await sendCommand('navigate', { url, tabId: pinned.tabId });
-        pinnedTabs.set(domainKey, { tabId: pinned.tabId, url });
-        console.log(`[pinned] reused tab ${pinned.tabId} for ${domainKey}`);
-        return { tabId: pinned.tabId, reused: true };
-      }
-    } catch {}
-    pinnedTabs.delete(domainKey);
-    console.log(`[pinned] stale tab for ${domainKey} — creating fresh`);
+      // Try navigating directly — if the tab was closed, this throws
+      await sendCommand('navigate', { url, tabId: pinned.tabId });
+      pinnedTabs.set(domainKey, { tabId: pinned.tabId, url });
+      console.log(`[pinned] reused tab ${pinned.tabId} for ${domainKey}`);
+      return { tabId: pinned.tabId, reused: true };
+    } catch {
+      pinnedTabs.delete(domainKey);
+      console.log(`[pinned] stale tab for ${domainKey} — creating fresh`);
+    }
   }
 
   const newTab = await sendCommand('new_tab', { url, pinned: true, active: false });
@@ -323,7 +321,7 @@ app.post('/ask_claude', async (req, res) => {
           responseText = responseText.replace(/^\d{1,2}:\d{2}\s*/, '').trim();
         }
 
-        if (responseText.length > 10) {
+        if (responseText.length > 0) {
           if (responseText === bestText) {
             stableCount++;
             if (stableCount >= 2) break;
@@ -335,7 +333,7 @@ app.post('/ask_claude', async (req, res) => {
       } catch { /* continue polling */ }
     }
 
-    if (bestText.length > 50) {
+    if (bestText.length > 0) {
       res.json({ ok: true, response: bestText.slice(0, 8000) });
     } else {
       res.json({ ok: false, error: 'Could not read response from claude.ai', partial: bestText });
