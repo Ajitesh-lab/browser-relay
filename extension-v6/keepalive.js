@@ -21,6 +21,10 @@ if (window.__relayVersion !== _RELAY_VERSION) {
   // Commands handled directly in content script (no background needed)
   async function handleLocal(msg) {
     const { id, type, params = {} } = msg;
+    // If a specific tabId is requested, ALWAYS forward to background
+    // (background.js has chrome.tabs/scripting APIs to target any tab)
+    if (params.tabId) return null;
+
     let result = null, error = null;
     try {
       if (type === 'version') {

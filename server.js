@@ -99,6 +99,16 @@ function sendCommand(type, params = {}, exclude = new Set(), attempt = 0) {
   });
 }
 
+// Helper: run JS in a specific tab and return the raw string result
+async function evalInTab(tabId, code) {
+  const raw = await sendCommand('eval', { code, tabId });
+  // background.js runInTab returns { ok, value } or { ok, error }
+  if (raw?.error) throw new Error(raw.error);
+  if (raw?.value !== undefined) return raw.value;
+  if (typeof raw === 'string') return raw;
+  return JSON.stringify(raw);
+}
+
 // Helper to wrap all routes
 function route(type, paramsFn) {
   return async (req, res) => {
@@ -232,139 +242,94 @@ app.post('/fetch_page', async (req, res) => {
 });
 
 // ── Ask claude.ai a question via the user's logged-in browser ──
+// Uses ONLY content/type/click/key commands (no eval — claude.ai CSP blocks it)
 app.post('/ask_claude', async (req, res) => {
   const { question } = req.body;
   const maxWait = req.body.timeout || 60000;
 
   try {
-    // 1. Navigate to claude.ai/new in a pinned tab
+    // 1. Navigate to claude.ai/new — reuses the pinned tab
     const { tabId } = await internalNavigate('https://claude.ai/new');
-    await sleep(4000);
+    await sleep(5000);
 
-    // 2. Check if we're on claude.ai and the editor exists
-    const checkResult = await sendCommand('eval', {
-      code: `(function(){
-        const editor = document.querySelector('[contenteditable="true"]') || document.querySelector('.ProseMirror');
-        return JSON.stringify({ hasEditor: !!editor, url: location.href, loggedIn: !location.href.includes('/login') });
-      })()`,
-      tabId
-    });
-
-    const check = JSON.parse(checkResult?.value || checkResult || '{}');
-    if (!check.hasEditor) {
-      return res.json({ ok: false, error: 'Claude.ai editor not found — may need login', url: check.url });
+    // 2. Check page loaded by reading content
+    const page = await sendCommand('content', { tabId });
+    const pageUrl = page?.url || '';
+    if (pageUrl.includes('/login') || (!pageUrl.includes('claude.ai'))) {
+      return res.json({ ok: false, error: 'Claude.ai not logged in or wrong page', url: pageUrl });
     }
 
-    // 3. Clear editor and type the question
-    await sendCommand('eval', {
-      code: `(function(){
-        const editor = document.querySelector('[contenteditable="true"]') || document.querySelector('.ProseMirror');
-        editor.focus();
-        // Select all existing text and delete
-        document.execCommand('selectAll');
-        document.execCommand('delete');
-        // Type the question
-        document.execCommand('insertText', false, ${JSON.stringify(question)});
-        return 'typed';
-      })()`,
+    // 3. Record baseline text length (before response)
+    const baselineLen = (page?.text || '').length;
+
+    // 4. Type the question into the editor
+    const typeResult = await sendCommand('type', {
+      selector: '[contenteditable="true"]',
+      text: question,
       tabId
     });
-
+    if (typeResult?.error) {
+      // Try ProseMirror selector
+      await sendCommand('type', { selector: '.ProseMirror', text: question, tabId });
+    }
     await sleep(800);
 
-    // 4. Click the send button
-    await sendCommand('eval', {
-      code: `(function(){
-        // Try aria-label variants
-        let btn = document.querySelector('button[aria-label="Send Message"]') ||
-                  document.querySelector('button[aria-label="Send message"]') ||
-                  document.querySelector('button[aria-label="Send"]');
-        // Try finding button with SVG arrow icon near the editor
-        if (!btn) {
-          const buttons = Array.from(document.querySelectorAll('button'));
-          btn = buttons.find(b => {
-            const rect = b.getBoundingClientRect();
-            return rect.bottom > window.innerHeight - 200 && b.querySelector('svg');
-          });
-        }
-        // Try submit button
-        if (!btn) btn = document.querySelector('form button[type="submit"]');
-        if (btn) { btn.click(); return 'clicked: ' + (btn.ariaLabel || btn.className); }
-        // Last resort: Enter key
-        const editor = document.querySelector('[contenteditable="true"]');
-        if (editor) {
-          editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-          return 'enter-fallback';
-        }
-        return 'no-send-button';
-      })()`,
-      tabId
-    });
+    // 5. Click the send button — try multiple selectors
+    const sendSelectors = [
+      'button[aria-label="Send Message"]',
+      'button[aria-label="Send message"]',
+      'button[aria-label="Send"]',
+      'form button[type="submit"]',
+    ];
+    let sent = false;
+    for (const sel of sendSelectors) {
+      try {
+        const r = await sendCommand('click', { selector: sel, tabId });
+        if (r?.ok) { sent = true; console.log('[ask_claude] clicked:', sel); break; }
+      } catch {}
+    }
+    if (!sent) {
+      // Fallback: press Enter in the editor
+      await sendCommand('key', { selector: '[contenteditable="true"]', key: 'Enter', tabId });
+      console.log('[ask_claude] enter fallback');
+    }
 
-    // 5. Poll for the response to complete
-    await sleep(5000); // initial wait for streaming to start
-
+    // 6. Poll for response by reading page content until it stabilizes
+    //    Look for text AFTER the user's question on the page
+    await sleep(6000);
     const startTime = Date.now();
     let bestText = '';
     let stableCount = 0;
+    const questionSnippet = question.slice(0, 60); // to locate the question on the page
 
     while (Date.now() - startTime < maxWait) {
       await sleep(3000);
-
       try {
-        const pollResult = await sendCommand('eval', {
-          code: `(function(){
-            // Detect streaming state
-            const stopBtn = document.querySelector('button[aria-label="Stop Response"]') ||
-                           document.querySelector('button[aria-label="Stop response"]') ||
-                           document.querySelector('[data-state="streaming"]');
-            const isStreaming = !!stopBtn;
+        const current = await sendCommand('content', { tabId });
+        const fullText = current?.text || '';
 
-            // Try to get the last assistant message
-            // Claude.ai uses various selectors depending on version
-            const msgContainers = document.querySelectorAll('[data-is-streaming], [class*="response"], [class*="message"]');
-            let responseText = '';
+        // Find the question in the page text and grab everything after it
+        const qIdx = fullText.lastIndexOf(questionSnippet);
+        let responseText = '';
+        if (qIdx >= 0) {
+          // Skip past the question itself + timestamp line
+          responseText = fullText.slice(qIdx + question.length).trim();
+          // Remove trailing UI chrome (e.g. "Sonnet 4.6\nClaude is AI...")
+          const chromeIdx = responseText.lastIndexOf('\nSonnet');
+          if (chromeIdx > 0) responseText = responseText.slice(0, chromeIdx).trim();
+          const chromeIdx2 = responseText.lastIndexOf('\nClaude is AI');
+          if (chromeIdx2 > 0) responseText = responseText.slice(0, chromeIdx2).trim();
+          // Remove leading timestamp (e.g. "18:45")
+          responseText = responseText.replace(/^\d{1,2}:\d{2}\s*/, '').trim();
+        }
 
-            // Strategy 1: find the last large text block that appeared after the input
-            const allBlocks = document.querySelectorAll('div[class], article, section');
-            for (const block of allBlocks) {
-              const text = block.innerText || '';
-              if (text.length > responseText.length && text.length > 100) {
-                // Exclude navigation/header elements
-                const tag = block.tagName.toLowerCase();
-                if (!block.querySelector('nav') && !block.querySelector('header')) {
-                  responseText = text;
-                }
-              }
-            }
-
-            // Strategy 2: just get page text and extract the likely answer
-            const fullText = document.body.innerText;
-
-            return JSON.stringify({
-              streaming: isStreaming,
-              responseText: responseText.slice(0, 8000),
-              fullTextLen: fullText.length,
-              fullTextEnd: fullText.slice(-5000)
-            });
-          })()`,
-          tabId
-        });
-
-        const parsed = JSON.parse(pollResult?.value || pollResult || '{}');
-        const currentText = parsed.responseText || parsed.fullTextEnd || '';
-
-        if (currentText.length > 100) {
-          if (currentText === bestText) {
+        if (responseText.length > 10) {
+          if (responseText === bestText) {
             stableCount++;
-            if (stableCount >= 2 && !parsed.streaming) break;
+            if (stableCount >= 2) break;
           } else {
             stableCount = 0;
-            bestText = currentText;
-          }
-          if (!parsed.streaming && currentText.length > 100) {
-            bestText = currentText;
-            break;
+            bestText = responseText;
           }
         }
       } catch { /* continue polling */ }
